@@ -12,16 +12,9 @@ import { InstallationGuide } from './components/InstallationGuide';
 import { OfficialReportModal } from './components/OfficialReportModal';
 import { SyncModal } from './components/SyncModal';
 import {
-  ExternalLink,
   CheckCircle2,
-  Shield,
-  HeartHandshake,
-  RefreshCw,
-  AlertCircle,
   AlertTriangle,
-  Sparkles,
   Bug,
-  Terminal,
   Copy,
   Check,
   ChevronDown,
@@ -43,6 +36,56 @@ export interface BranchDebugEntry {
   timestamp: string;
 }
 
+// ============================================================================
+// PERBAIKAN 1: Konstanta URL + reset data lama di browser (sekali saja)
+// ============================================================================
+
+// Default Google Apps Script Web App Endpoint (URL /exec dari Deploy)
+const DEFAULT_GAS_URL =
+  'https://script.google.com/macros/s/AKfycbyrGkxzq1j6tHHed4RR27pTbbnTYcer1qwqx8v2VsRscUZqpMKF9hK3JzJ8r8sE9wvJ/exec';
+
+// Naikkan angka ini jika suatu saat ingin memaksa semua browser membuang data lama.
+const APP_DATA_VERSION = '2';
+
+// Dijalankan sekali saat file dimuat: buang cache lama (data peserta usang & URL lama)
+try {
+  if (localStorage.getItem('ftbi_data_version') !== APP_DATA_VERSION) {
+    localStorage.removeItem('ftbi_peserta_data');
+    localStorage.removeItem('ftbi_gas_url');
+    localStorage.removeItem('ftbi_sheet_url');
+    localStorage.removeItem('ftbi_sheet_name');
+    localStorage.setItem('ftbi_data_version', APP_DATA_VERSION);
+  }
+} catch {
+  // localStorage tidak tersedia (mis. mode privat tertentu) - abaikan
+}
+
+// ============================================================================
+// PERBAIKAN 2: Helper fetch langsung ke Apps Script (tanpa /api/gas-proxy)
+// ============================================================================
+
+// Bangun URL + parameter + anti-cache (_=timestamp)
+const buildGasUrl = (base: string, params: Record<string, string>): string => {
+  const u = new URL(base);
+  Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, v));
+  u.searchParams.set('_', String(Date.now()));
+  return u.toString();
+};
+
+// Ambil JSON dari Apps Script, tidak di-cache, dengan pesan error yang jelas
+const fetchGasJson = async (url: string): Promise<any> => {
+  const res = await fetch(url, { method: 'GET', cache: 'no-store' });
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      'Respons dari Google Apps Script bukan JSON. Pastikan deployment diatur "Who has access: Anyone", ' +
+        'memakai URL yang berakhiran /exec, dan sudah di-deploy ulang dengan "New version".'
+    );
+  }
+};
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'leaderboard' | 'peserta' | 'undian' | 'scoring' | 'simulation' | 'gas_code' | 'guide'>('leaderboard');
   const [selectedJenjang, setSelectedJenjang] = useState<Jenjang>('SD');
@@ -55,7 +98,7 @@ export default function App() {
       if (p.cabangLombaId === 'berpidato') {
         const checkStr = `${p.nama} ${p.asalSekolah} ${p.kecamatanKabupaten} ${p.id}`.toLowerCase();
         const notes = `${p.nilaiJuri1?.catatan || ''} ${p.nilaiJuri2?.catatan || ''} ${p.nilaiJuri3?.catatan || ''}`.toLowerCase();
-        
+
         // Cek Menyanyi Nyanyian Rakyat
         if (
           checkStr.includes('nyanyi') ||
@@ -140,9 +183,6 @@ export default function App() {
     localStorage.setItem('ftbi_peserta_data', JSON.stringify(pesertaList));
   }, [pesertaList]);
 
-  // Default Google Apps Script Web App Endpoint provided by user
-  const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyrGkxzq1j6tHHed4RR27pTbbnTYcer1qwqx8v2VsRscUZqpMKF9hK3JzJ8r8sE9wvJ/exec';
-
   // Google Apps Script Connection State
   const [webAppUrl, setWebAppUrl] = useState<string>(() => {
     return localStorage.getItem('ftbi_gas_url') || DEFAULT_GAS_URL;
@@ -163,14 +203,13 @@ export default function App() {
     }, 6000);
   };
 
-  // Real-time Auto-Refresh / Live Sync State (Langsung tanpa countdown)
+  // Real-time Auto-Refresh / Live Sync State
   const [isAutoRefreshEnabled, setIsAutoRefreshEnabled] = useState<boolean>(true);
 
-  // Background Live Sync: pembaruan otomatis berkala langsung tanpa hitung mundur
+  // Background Live Sync: pembaruan otomatis berkala setiap 20 detik
   useEffect(() => {
     if (!isAutoRefreshEnabled) return;
 
-    // Interval sinkronisasi background langsung setiap 20 detik
     const timer = setInterval(() => {
       const urlToSync = webAppUrl.trim() || DEFAULT_GAS_URL;
       syncFromGas(urlToSync, true);
@@ -210,7 +249,9 @@ export default function App() {
     });
   };
 
-  // Handler: Save Score from Jury
+  // ==========================================================================
+  // PERBAIKAN 3: Simpan skor juri langsung ke Apps Script (tanpa proxy)
+  // ==========================================================================
   const handleSaveScore = async (
     pesertaId: string,
     juryId: JuryId,
@@ -250,7 +291,7 @@ export default function App() {
     // Trigger visual pulse & highlight on this participant
     markPesertaAsRecentlyUpdated(pesertaId);
 
-    // Send score update via HTTP POST to Google Apps Script endpoint
+    // Kirim skor ke Google Apps Script via POST langsung
     const targetUrl = webAppUrl.trim() || DEFAULT_GAS_URL;
     if (targetUrl) {
       setIsSavingRemote(true);
@@ -273,22 +314,15 @@ export default function App() {
             timestamp: now,
           };
 
-          // Try backend proxy first to avoid any CORS header issues
-          try {
-            await fetch('/api/gas-proxy', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ url: targetUrl, payload }),
-            });
-          } catch {
-            // Fallback to direct fetch
-            await fetch(targetUrl, {
-              method: 'POST',
-              mode: 'no-cors',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload),
-            });
-          }
+          // mode 'no-cors' hanya mengizinkan content-type sederhana, jadi pakai text/plain.
+          // Di Apps Script, tetap baca dengan JSON.parse(e.postData.contents).
+          await fetch(targetUrl, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(payload),
+          });
+
           const timeNow = new Date().toLocaleTimeString('id-ID');
           setLastSyncTime(timeNow);
           setIsConnectedGas(true);
@@ -383,7 +417,7 @@ export default function App() {
     }
   };
 
-  // Debug State for Unmatched / Ambiguous Branch Strings (Requested for troubleshooting)
+  // Debug State for Unmatched / Ambiguous Branch Strings
   const [debugUnmatchedBranches, setDebugUnmatchedBranches] = useState<BranchDebugEntry[]>([]);
   const [isDebugPanelExpanded, setIsDebugPanelExpanded] = useState<boolean>(true);
   const [copiedDebugId, setCopiedDebugId] = useState<string | null>(null);
@@ -418,7 +452,6 @@ export default function App() {
 
     const hasSpecialWhitespace = specialCharsFound.length > 0;
 
-    // Log detail ke browser console sesuai permintaan user
     console.warn(
       `🔍 [FTBI Debug normalizeCabangId] Peringatan: String cabang "${rawStr}" (panjang: ${rawStr.length}) tidak cocok secara langsung!\n` +
       `  • Raw string        : "${rawStr}"\n` +
@@ -457,11 +490,10 @@ export default function App() {
     });
   };
 
-  // Normalization Helpers for Spreadsheet Data dengan sanitasi Unicode luas & penanganan variasi Menyanyi Nyanyian Rakyat
+  // Normalization Helpers for Spreadsheet Data
   const normalizeCabangId = (str: string, rowOrItem?: any): string => {
     const rawStr = String(str || '');
 
-    // 1. Sanitasi string: dekomposisi Unicode & konversi seluruh ragam spasi/NBSP (\u00A0) ke spasi standar
     const cleanStr = rawStr
       .normalize('NFKD')
       .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF]/g, ' ')
@@ -470,7 +502,7 @@ export default function App() {
       .trim()
       .toLowerCase();
 
-    // 2. Cabang Menyanyi Nyanyian Rakyat (Mencakup seluruh variasi kata kunci resmi & kedaerahan)
+    // Cabang Menyanyi Nyanyian Rakyat
     if (
       cleanStr.includes('nyanyi') ||
       cleanStr.includes('rakyat') ||
@@ -490,7 +522,7 @@ export default function App() {
       return 'menyanyi';
     }
 
-    // 3. Cabang Cerita Pendek (Menulis Cerpen)
+    // Cabang Cerita Pendek (Menulis Cerpen)
     if (
       cleanStr.includes('cerita') ||
       cleanStr.includes('pendek') ||
@@ -500,17 +532,17 @@ export default function App() {
       return 'menulis_cerpen';
     }
 
-    // 4. Cabang Menulis dan Membaca Puisi
+    // Cabang Menulis dan Membaca Puisi
     if (cleanStr.includes('puisi') || cleanStr.includes('sajak')) {
       return 'menulis_membaca_puisi';
     }
 
-    // 5. Cabang Mendongeng
+    // Cabang Mendongeng
     if (cleanStr.includes('dongeng') || cleanStr.includes('ngedongeng')) {
       return 'mendongeng';
     }
 
-    // 6. Cabang Lawakan Tunggal (Stand Up Comedy)
+    // Cabang Lawakan Tunggal (Stand Up Comedy)
     if (
       cleanStr.includes('stand') ||
       cleanStr.includes('comedy') ||
@@ -522,12 +554,12 @@ export default function App() {
       return 'stand_up_comedy';
     }
 
-    // 7. Cabang Berpidato (Biantara)
+    // Cabang Berpidato (Biantara)
     if (cleanStr.includes('pidato') || cleanStr.includes('biantara')) {
       return 'berpidato';
     }
 
-    // 8. Pemindaian Mendalam (Deep Scan) pada seluruh data baris jika kolom cabang tidak langsung cocok
+    // Pemindaian Mendalam pada seluruh data baris jika kolom cabang tidak langsung cocok
     if (rowOrItem) {
       const allText = (typeof rowOrItem === 'object'
         ? Object.values(rowOrItem).map((v) => String(v || '')).join(' ')
@@ -566,7 +598,7 @@ export default function App() {
       }
     }
 
-    // 9. CABANG TIDAK DAPAT DITEMUKAN: Jalankan debug log & catat ke alert UI
+    // Cabang tidak ditemukan: catat debug & fallback
     const fallbackId = CABANG_LOMBA_LIST[0].id;
     recordUnmatchedBranchDebug(rawStr, cleanStr, fallbackId, rowOrItem);
 
@@ -597,12 +629,14 @@ export default function App() {
     }
   }, [syncSuccessMessage]);
 
-  // Handler: Sync from Google Apps Script Web App
+  // ==========================================================================
+  // PERBAIKAN 4: Sinkronisasi dari Google Apps Script (fetch langsung)
+  // ==========================================================================
   const syncFromGas = async (url: string, isSilent: boolean = false): Promise<boolean> => {
     const rawUrl = url.trim();
     if (!rawUrl) return false;
 
-    // If user accidentally pasted a Google Spreadsheet URL here, route automatically to direct sheet sync!
+    // Jika user menempelkan URL Spreadsheet, arahkan ke sinkronisasi sheet langsung
     if (rawUrl.includes('docs.google.com/spreadsheets/d/')) {
       return syncFromDirectSheet(rawUrl, 'Form Responses 1', isSilent);
     }
@@ -615,37 +649,29 @@ export default function App() {
     try {
       localStorage.setItem('ftbi_gas_url', rawUrl);
 
-      // Call proxy
-      const proxyUrl = `/api/gas-proxy?url=${encodeURIComponent(rawUrl)}&action=getLeaderboard&branch=all&level=all`;
-      const proxyRes = await fetch(proxyUrl, { method: 'GET' });
-      const proxyData = await proxyRes.json();
-
-      if (proxyData.errorType === 'AUTH_REQUIRED') {
-        throw new Error(
-          '⚠️ Akses Ditolak oleh Google: Saat melakukan Deploy di Apps Script, pada kolom "Who has access" (Siapa yang memiliki akses), Anda WAJIB memilih "Anyone" (Siapa saja). Jika disetel "Only myself", browser memblokirnya.'
-        );
-      }
+      // Ambil data langsung dari Apps Script (anti-cache, tanpa proxy)
+      const dataUrl = buildGasUrl(rawUrl, { action: 'getLeaderboard', branch: 'all', level: 'all' });
+      const gasData = await fetchGasJson(dataUrl);
 
       let dataArray: any[] = [];
-      if (proxyRes.ok && proxyData && proxyData.status === 'success') {
-        dataArray = Array.isArray(proxyData.data) ? proxyData.data : [];
-      } else if (proxyData.message) {
-        throw new Error(proxyData.message);
+      if (gasData && gasData.status === 'success') {
+        dataArray = Array.isArray(gasData.data) ? gasData.data : [];
+      } else if (gasData && gasData.message) {
+        throw new Error(gasData.message);
       }
 
-      // If branch sheets were empty, trigger syncFromForm
+      // Jika sheet cabang kosong, picu syncFromForm lalu ambil ulang
       if (dataArray.length === 0) {
         try {
-          const formSyncUrl = `/api/gas-proxy?url=${encodeURIComponent(rawUrl)}&action=syncFromForm`;
-          await fetch(formSyncUrl, { method: 'GET' });
-
-          const retryRes = await fetch(proxyUrl, { method: 'GET' });
-          const retryData = await retryRes.json();
+          await fetchGasJson(buildGasUrl(rawUrl, { action: 'syncFromForm' }));
+          const retryData = await fetchGasJson(
+            buildGasUrl(rawUrl, { action: 'getLeaderboard', branch: 'all', level: 'all' })
+          );
           if (retryData.status === 'success' && Array.isArray(retryData.data)) {
             dataArray = retryData.data;
           }
-        } catch {
-          // ignore retry failure
+        } catch (retryErr) {
+          console.warn('Retry syncFromForm gagal:', retryErr);
         }
       }
 
@@ -654,7 +680,7 @@ export default function App() {
           const jenjang = normalizeJenjang(item.jenjang);
           let cabangLombaId = normalizeCabangId(item.cabangLombaId || item.cabangLombaNama || item.cabang || item.namaLomba || item.lomba, item);
 
-          // PENCEGAHAN KHUSUS: Jika item terdata sebagai berpidato padahal sebenarnya menyanyi atau cerita pendek
+          // Pencegahan: item terdata berpidato padahal sebenarnya menyanyi / cerita pendek
           if (cabangLombaId === 'berpidato') {
             const allItemStr = JSON.stringify(item).toLowerCase();
             if (
@@ -693,7 +719,7 @@ export default function App() {
             jenjang,
             cabangLombaId,
             kategoriGender,
-            timestampPendaftaran: item.updatedAt || new Date().toLocaleString('id-ID'),
+            timestampPendaftaran: gasData?.updatedAt || new Date().toLocaleString('id-ID'),
             totalNilai: Number(item.totalNilai) || 0,
             rataRataNilai: Number(item.rataRataNilai) || 0,
             peringkat: Number(item.peringkat) || idx + 1,
@@ -725,7 +751,7 @@ export default function App() {
 
         const recalculated = recalculateData(syncedList);
 
-        // Detect participants with changed scores or newly synced entries to trigger visual pulse
+        // Deteksi peserta yang berubah untuk efek visual
         setPesertaList((prevList) => {
           const changedIds: string[] = [];
           recalculated.forEach((newP) => {
@@ -763,10 +789,15 @@ export default function App() {
         return true;
       } else {
         setIsConnectedGas(true);
-        setSyncSuccessMessage('Terhubung dengan Google Apps Script. Namun respon Google Form belum memiliki data pendaftaran peserta.');
+        // Pesan hanya ditampilkan untuk sinkronisasi manual (bukan polling 20 detik)
+        if (!isSilent) {
+          setSyncSuccessMessage('Terhubung dengan Google Apps Script. Namun respon Google Form belum memiliki data pendaftaran peserta.');
+        }
         return true;
       }
     } catch (err: any) {
+      // Error sekarang selalu dicatat di console agar mudah didiagnosis
+      console.error('Sinkronisasi Google Apps Script gagal:', err);
       if (!isSilent) {
         setConnectionError(err.message || 'Gagal terhubung ke Google Apps Script.');
       }
@@ -778,6 +809,8 @@ export default function App() {
   };
 
   // Handler: Sync directly from Google Sheet (GViz API)
+  // CATATAN: memakai /api/sheet-proxy yang hanya ada jika Anda punya backend / Vercel Function.
+  // Jika tidak ada, fungsi ini akan menampilkan pesan error yang jelas (bukan gagal diam-diam).
   const syncFromDirectSheet = async (urlOrId: string, sheetName: string = 'Form Responses 1', isSilent: boolean = false): Promise<boolean> => {
     if (!urlOrId.trim()) return false;
     if (!isSilent) {
@@ -790,8 +823,18 @@ export default function App() {
       localStorage.setItem('ftbi_sheet_name', sheetName.trim());
 
       const proxyUrl = `/api/sheet-proxy?url=${encodeURIComponent(urlOrId.trim())}&sheet=${encodeURIComponent(sheetName.trim())}`;
-      const res = await fetch(proxyUrl);
-      const data = await res.json();
+      const res = await fetch(proxyUrl, { cache: 'no-store' });
+      const rawText = await res.text();
+
+      let data: any;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        throw new Error(
+          'Endpoint /api/sheet-proxy tidak tersedia di hosting ini (Vercel hanya menyajikan file statis). ' +
+            'Gunakan URL Google Apps Script (/exec) untuk sinkronisasi.'
+        );
+      }
 
       if (!res.ok || data.status !== 'success') {
         throw new Error(data.message || 'Gagal membaca Google Sheet.');
@@ -802,7 +845,6 @@ export default function App() {
         throw new Error(`Sheet "${sheetName}" ditemukan namun belum memiliki baris data peserta.`);
       }
 
-      // Convert rows dynamically by searching object keys
       const convertedList: PesertaFTBI[] = [];
 
       rows.forEach((row, idx) => {
@@ -813,29 +855,25 @@ export default function App() {
         };
 
         const nama = findVal(/nama/i);
-        if (!nama) return; // skip row without name
+        if (!nama) return;
 
         const jenjang = normalizeJenjang(findVal(/jenjang|tingkat|kelas/i));
-        
-        // Prioritas 1: Header khusus cabang lomba (menghindari kolom Jenjang Lomba atau Kategori Lomba)
+
         let rawCabang = findVal(
           /cabang|mata\s*lomba|jenis\s*lomba|bidang\s*lomba/i,
           /jenjang|tingkat|kelas|gender|putra|putri|kategori\s*peserta/i
         );
 
-        // Prioritas 2: Header yang menyebutkan lomba/pilihan yang bukan jenjang/gender
         if (!rawCabang) {
           rawCabang = findVal(/lomba|pilihan/i, /jenjang|tingkat|kelas|gender|putra|putri|kategori/i);
         }
 
-        // Prioritas 3: Jika sheetName sendiri merepresentasikan cabang lomba (misal 'SD_Menyanyi' atau 'Menyanyi Nyanyian Rakyat')
         if (!rawCabang && sheetName) {
           rawCabang = sheetName;
         }
 
         let cabangLombaId = normalizeCabangId(rawCabang, row);
 
-        // Jika terdeteksi berpidato padahal di data baris terdapat indikasi menyanyi atau cerita pendek
         if (cabangLombaId === 'berpidato' && !rawCabang.toLowerCase().includes('pidato')) {
           const rowText = Object.values(row)
             .map((v) => String(v || ''))
@@ -903,6 +941,7 @@ export default function App() {
         throw new Error('Tidak ditemukan baris peserta dengan kolom "Nama" pada sheet tersebut.');
       }
     } catch (err: any) {
+      console.error('Sinkronisasi Google Sheet gagal:', err);
       if (!isSilent) {
         setConnectionError(err.message || 'Gagal membaca data dari Google Spreadsheet.');
       }
@@ -913,7 +952,7 @@ export default function App() {
     }
   };
 
-  // Auto-sync on component mount using the Apps Script Web App endpoint
+  // Auto-sync saat komponen dimuat memakai endpoint Apps Script
   useEffect(() => {
     const urlToUse = webAppUrl.trim() || DEFAULT_GAS_URL;
     syncFromGas(urlToUse, true).then((success) => {
@@ -1048,6 +1087,16 @@ export default function App() {
             >
               Tutup
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Banner error sinkronisasi: sebelumnya error disembunyikan saat sync otomatis */}
+      {!isConnectedGas && connectionError && (
+        <div className="bg-red-600 text-white px-4 py-2.5 text-xs font-semibold shadow-md">
+          <div className="max-w-7xl mx-auto w-full flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{connectionError}</span>
           </div>
         </div>
       )}
