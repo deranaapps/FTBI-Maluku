@@ -54,7 +54,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   const [testString, setTestString] = useState('');
   const [showTester, setShowTester] = useState(false);
 
-  if (!isOpen) return null;
+
 
   // Participant breakdown by branch
   const branchCounts = CABANG_LOMBA_LIST.map((c) => {
@@ -125,6 +125,8 @@ export const SyncModal: React.FC<SyncModalProps> = ({
       branchId: matchedBranchId,
     };
   }, [testString]);
+
+  if (!isOpen) return null;
 
   const handleGasSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
