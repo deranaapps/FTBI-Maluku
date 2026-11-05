@@ -1,0 +1,6 @@
+{
+  "name": "Sistem Penilaian FTBI & Leaderboard M3",
+  "description": "Sistem Penilaian Otomatis & Leaderboard Festival Tunas Bahasa Ibu (FTBI) berbasis Google Material 3 dan Google Apps Script terintegrasi Spreadsheet.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
